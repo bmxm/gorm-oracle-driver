@@ -3,7 +3,7 @@ package oracle
 import (
 	"database/sql"
 	"fmt"
-	"gorm.io/gorm/utils"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,12 +16,13 @@ import (
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/migrator"
 	"gorm.io/gorm/schema"
+	"gorm.io/gorm/utils"
 )
 
 type Config struct {
 	DriverName        string
 	DSN               string
-	Conn              *sql.DB
+	Conn              gorm.ConnPool
 	DefaultStringSize uint
 }
 
@@ -49,8 +50,14 @@ func (d Dialector) Initialize(db *gorm.DB) (err error) {
 	db.NamingStrategy = Namer{}
 	d.DefaultStringSize = 1024
 
+	config := &callbacks.Config{
+		CreateClauses: []string{"INSERT", "VALUES", "ON CONFLICT"},
+		QueryClauses:  []string{"SELECT", "FROM", "WHERE", "GROUP BY", "LIMIT", "ORDER BY", "FOR"},
+		UpdateClauses: []string{"UPDATE", "SET", "WHERE"},
+		DeleteClauses: []string{"DELETE", "FROM", "WHERE"},
+	}
 	// register callbacks
-	callbacks.RegisterDefaultCallbacks(db, &callbacks.Config{WithReturning: true})
+	callbacks.RegisterDefaultCallbacks(db, config)
 
 	d.DriverName = "godror"
 
@@ -60,7 +67,51 @@ func (d Dialector) Initialize(db *gorm.DB) (err error) {
 		db.ConnPool, err = sql.Open(d.DriverName, d.DSN)
 	}
 
-	if err = db.Callback().Create().Replace("gorm:create", Create); err != nil {
+	createCallback := db.Callback().Create()
+	if err = createCallback.Replace("gorm:before_create", BeforeCreate); err != nil {
+		fmt.Printf("Replace gorm:before_create err: %+v \n", err)
+		return
+	}
+	if err = createCallback.Replace("gorm:create", Create); err != nil {
+		fmt.Printf("Replace gorm:create err: %+v \n", err)
+		return
+	}
+
+	queryCallback := db.Callback().Query()
+	if err = queryCallback.Replace("gorm:query", Query); err != nil {
+		fmt.Printf("Replace gorm:query err: %+v \n", err)
+		return
+	}
+
+	updateCallback := db.Callback().Update()
+	if err = updateCallback.Replace("gorm:before_update", BeforeUpdate); err != nil {
+		fmt.Printf("Replace gorm:before_update err: %+v \n", err)
+		return
+	}
+	if err = updateCallback.Replace("gorm:update", Update(config)); err != nil {
+		fmt.Printf("Replace gorm:update err: %+v \n", err)
+		return
+	}
+
+	deleteCallback := db.Callback().Delete()
+	if err = deleteCallback.Replace("gorm:before_delete", BeforeDelete); err != nil {
+		fmt.Printf("Replace gorm:before_delete err: %+v \n", err)
+		return
+	}
+	if err = deleteCallback.Replace("gorm:delete", Delete(config)); err != nil {
+		fmt.Printf("Replace gorm:delete err: %+v \n", err)
+		return
+	}
+
+	rowCallback := db.Callback().Row()
+	if err = rowCallback.Replace("gorm:row", RowQuery); err != nil {
+		fmt.Printf("Replace gorm:row err: %+v \n", err)
+		return
+	}
+
+	rawCallback := db.Callback().Raw()
+	if err = rawCallback.Replace("gorm:raw", Raw); err != nil {
+		fmt.Printf("Replace gorm:raw err: %+v \n", err)
 		return
 	}
 
@@ -79,29 +130,15 @@ func (d Dialector) ClauseBuilders() map[string]clause.ClauseBuilder {
 func (d Dialector) RewriteLimit(c clause.Clause, builder clause.Builder) {
 	if limit, ok := c.Expression.(clause.Limit); ok {
 		if stmt, ok := builder.(*gorm.Statement); ok {
-			if _, ok := stmt.Clauses["ORDER BY"]; !ok {
-				s := stmt.Schema
-				builder.WriteString("ORDER BY ")
-				if s != nil && s.PrioritizedPrimaryField != nil {
-					builder.WriteQuoted(s.PrioritizedPrimaryField.DBName)
-					builder.WriteByte(' ')
-				} else {
-					builder.WriteString("(SELECT NULL FROM ")
-					builder.WriteString(d.DummyTableName())
-					builder.WriteString(")")
-				}
+			if _, ok := stmt.Clauses["WHERE"]; !ok {
+				builder.WriteString("WHERE 1 = 1 ")
 			}
-		}
+			builder.WriteString(" AND ROWNUM <= ")
+			builder.WriteString(strconv.Itoa(limit.Limit))
 
-		if offset := limit.Offset; offset > 0 {
-			builder.WriteString(" OFFSET ")
-			builder.WriteString(strconv.Itoa(offset))
-			builder.WriteString(" ROWS")
-		}
-		if limit := limit.Limit; limit > 0 {
-			builder.WriteString(" FETCH NEXT ")
-			builder.WriteString(strconv.Itoa(limit))
-			builder.WriteString(" ROWS ONLY")
+			if limit.Offset > 0 {
+				panic("Offset not supported.")
+			}
 		}
 	}
 }
@@ -233,4 +270,59 @@ func (d Dialector) SavePoint(tx *gorm.DB, name string) error {
 func (d Dialector) RollbackTo(tx *gorm.DB, name string) error {
 	tx.Exec("ROLLBACK TO SAVEPOINT " + name)
 	return tx.Error
+}
+
+// TODO: 此改动将导致该驱动仅适用于大写的表名及字段名
+func upperDBName(db *gorm.DB) {
+	// upper table db name
+	if db.Statement == nil {
+		return
+	}
+	tableName := strings.Trim(db.Statement.Table, `"`)
+	tableName = `"` + strings.ToUpper(tableName) + `"`
+	db.Statement.Table = tableName
+
+	// upper field db name
+	schema := db.Statement.Schema
+	if schema == nil {
+		return
+	}
+	db.Statement.Schema.Table = tableName
+	for i, dbName := range schema.DBNames {
+		field := schema.FieldsByDBName[dbName]
+
+		dbName = strings.Trim(dbName, `"`)
+		dbName = `"` + strings.ToUpper(dbName) + `"`
+		schema.DBNames[i] = dbName
+
+		field.DBName = dbName
+		schema.FieldsByDBName[dbName] = field
+	}
+}
+
+func transferValType(db *gorm.DB) {
+	if db.Statement == nil || db.Statement.Statement == nil {
+		return
+	}
+
+	stmt := db.Statement.Statement
+	for i, val := range stmt.Vars {
+		switch val.(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string:
+
+		default:
+			// 自定义类型在 godror 会报 unknown type (如：stmt.go 1242)
+			switch reflect.TypeOf(val).Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				val = reflect.ValueOf(val).Int()
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				val = reflect.ValueOf(val).Uint()
+			case reflect.Float32, reflect.Float64:
+				val = reflect.ValueOf(val).Float()
+			case reflect.String:
+				val = reflect.ValueOf(val).String()
+			}
+			stmt.Vars[i] = val
+		}
+	}
 }

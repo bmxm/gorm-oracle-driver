@@ -3,16 +3,21 @@ package oracle
 import (
 	"bytes"
 	"database/sql"
+	"gorm.io/gorm"
 	"reflect"
 
 	"github.com/thoas/go-funk"
-	"gorm.io/gorm"
 	"gorm.io/gorm/callbacks"
 	"gorm.io/gorm/clause"
 	gormSchema "gorm.io/gorm/schema"
 
-	"github.com/cengsin/oracle/clauses"
+	"github.com/bmxm/gorm-oracle-driver/clauses"
 )
+
+func BeforeCreate(db *gorm.DB) {
+	callbacks.BeforeCreate(db)
+	upperDBName(db)
+}
 
 func Create(db *gorm.DB) {
 	stmt := db.Statement
@@ -104,6 +109,20 @@ func Create(db *gorm.DB) {
 						} else {
 							val = 0
 						}
+					case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string:
+
+					default:
+						// 自定义类型在 godror 插入数据库时会报 unknown type (stmt.go 1242)
+						switch reflect.TypeOf(val).Kind() {
+						case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+							val = reflect.ValueOf(val).Int()
+						case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+							val = reflect.ValueOf(val).Uint()
+						case reflect.Float32, reflect.Float64:
+							val = reflect.ValueOf(val).Float()
+						case reflect.String:
+							val = reflect.ValueOf(val).String()
+						}
 					}
 
 					stmt.Vars[idx] = val
@@ -134,7 +153,7 @@ func Create(db *gorm.DB) {
 							func(field *gormSchema.Field) {
 								switch insertTo.Kind() {
 								case reflect.Struct:
-									if err = field.Set(insertTo, stmt.Vars[boundVars[field.Name]].(sql.Out).Dest); err != nil {
+									if err = field.Set(stmt.Context, insertTo, stmt.Vars[boundVars[field.Name]].(sql.Out).Dest); err != nil {
 										db.AddError(err)
 									}
 								case reflect.Map:

@@ -1,35 +1,32 @@
-# GORM Oracle Driver
 
-![](https://starchart.cc/CengSin/oracle.svg)
 
 ## Description
 
-GORM Oracle driver for connect Oracle DB and Manage Oracle DB, Based on [stevefan1999-personal/gorm-driver-oracle](https://github.com/stevefan1999-personal/gorm-driver-oracle)
-，not recommended for use in a production environment
+GORM Oracle driver for connect Oracle DB and Manage Oracle DB, Based on [CengSin/oracle](https://github.com/CengSin/oracle)
+Oracle 表名和字段名必须大写。
 
 ## Required dependency Install
 
-- Oracle 12C+
+- Oracle 11g+
 - Golang 1.13+
 - see [ODPI-C Installation.](https://oracle.github.io/odpi/doc/installation.html)
 
 ## Quick Start
 ### how to install 
 ```bash
-go get github.com/cengsin/oracle
+go get github.com/bmxm/gorm-oracle-driver
 ```
 ###  usage
 
 ```go
 import (
-	"fmt"
-	"github.com/cengsin/oracle"
-	"gorm.io/gorm"
-	"log"
+    "gorm.io/gorm"
+
+    "github.com/bmxm/gorm-oracle-driver"
 )
 
 func main() {
-    db, err := gorm.Open(oracle.Open("system/oracle@127.0.0.1:1521/XE"), &gorm.Config{})
+    db, err := gorm.Open(oracle.Open("oracle://username:password@127.0.0.1/servicename"), &gorm.Config{})
     if err != nil {
         // panic error or log error info
     } 
